@@ -52,6 +52,9 @@ conf.set('PROJECT_VERSION', '"@0@"'.format(meson.project_version()))
 
 conf.set('SYSCONFDIR', '"@0@"'.format(sysconfdir))
 
+conf.set('CONFIG_LIBMCTP', get_option('libmctp'))
+
+
 if get_option('json-c').disabled()
     json_c_dep = dependency('', required: false)
 else

@@ -678,7 +678,8 @@ int main(int argc, char **argv)
 	nvme_mi_ep_t ep;
 	bool dbus = false, usage = true;
 	uint8_t eid;
-	int rc = 0, net;
+	int rc = 0;
+	nvme_netid_t net;
 
 	if (argc >= 2 && strcmp(argv[1], "dbus") == 0) {
 		usage = false;
@@ -687,7 +688,14 @@ int main(int argc, char **argv)
 		argc -= 1;
 	} else if (argc >= 3) {
 		usage = false;
+#ifndef CONFIG_LIBMCTP
 		net = atoi(argv[1]);
+#else
+		char sockName[128] = {0};
+
+		snprintf(&sockName[1], sizeof(sockName) - 1, "%s", argv[1]);
+		net = sockName;
+#endif
 		eid = atoi(argv[2]) & 0xff;
 		argv += 2;
 		argc -= 2;

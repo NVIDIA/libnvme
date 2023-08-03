@@ -417,6 +417,13 @@ void nvme_mi_set_probe_enabled(nvme_root_t root, bool enabled);
 /* Top level management object: NVMe-MI Management Endpoint */
 struct nvme_mi_ep;
 
+
+
+#ifndef CONFIG_LIBMCTP
+typedef unsigned int nvme_netid_t;
+#else
+typedef char * nvme_netid_t;
+#endif
 /**
  * typedef nvme_mi_ep_t - MI Endpoint object.
  *
@@ -588,7 +595,7 @@ nvme_mi_ctrl_t nvme_mi_next_ctrl(nvme_mi_ep_t ep, nvme_mi_ctrl_t c);
  *
  * See &nvme_mi_close
  */
-nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, uint8_t eid);
+nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, nvme_netid_t netid, uint8_t eid);
 
 /**
  * nvme_mi_close() - Close an endpoint connection and release resources,

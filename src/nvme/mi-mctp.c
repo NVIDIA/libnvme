@@ -14,6 +14,7 @@
 
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 
@@ -27,7 +28,7 @@
 #include <dbus/dbus.h>
 
 #define MCTP_DBUS_PATH "/xyz/openbmc_project/mctp"
-#define MCTP_DBUS_IFACE "xyz.openbmc_project.MCTP"
+#define MCTP_DBUS_IFACE "xyz.openbmc_project.MCTP.Control.PCIe"
 #define MCTP_DBUS_IFACE_ENDPOINT "xyz.openbmc_project.MCTP.Endpoint"
 #endif
 
@@ -220,6 +221,201 @@ static bool nvme_mi_mctp_resp_is_mpr(void *buf, size_t len,
 	return true;
 }
 
+static int nvme_mi_libmctp_submit(struct nvme_mi_ep *ep,
+			       struct nvme_mi_req *req,
+			       struct nvme_mi_resp *resp)
+{
+	struct nvme_mi_transport_mctp *mctp;
+	struct iovec req_iov[3], resp_iov[3];
+	struct msghdr req_msg, resp_msg;
+	int i, rc, errno_save, timeout;
+	struct pollfd pollfds[1];
+	unsigned int mpr_time;
+	ssize_t len;
+	__le32 mic;
+	__u8 tag;
+
+	if (ep->transport != &nvme_mi_transport_mctp) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* we need enough space for at least a generic (/error) response */
+	if (resp->hdr_len < sizeof(struct nvme_mi_msg_resp)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	mctp = ep->transport_data;
+	tag = nvme_mi_mctp_tag_alloc(ep);
+
+	i = 0;
+	uint8_t hdr[2] = { mctp->eid, MCTP_TYPE_NVME| MCTP_TYPE_MIC};
+	req_iov[i].iov_base = (__u8 *) hdr;
+	req_iov[i].iov_len = sizeof(hdr);
+	i++;
+
+	req_iov[i].iov_base = ((__u8 *)req->hdr) + 1;
+	req_iov[i].iov_len = req->hdr_len - 1;
+	i++;
+
+	if (req->data_len) {
+		req_iov[i].iov_base = req->data;
+		req_iov[i].iov_len = req->data_len;
+		i++;
+	}
+
+	mic = cpu_to_le32(req->mic);
+	req_iov[i].iov_base = &mic;
+	req_iov[i].iov_len = sizeof(mic);
+	i++;
+
+	memset(&req_msg, 0, sizeof(req_msg));
+	req_msg.msg_iov = req_iov;
+	req_msg.msg_iovlen = i;
+
+	len = ops.sendmsg(mctp->sd, &req_msg, 0);
+	if (len < 0) {
+		errno_save = errno;
+		nvme_msg(ep->root, LOG_ERR,
+			 "Failure sending MCTP message: %m\n");
+		errno = errno_save;
+		rc = -1;
+		goto out;
+	}
+	unsigned char eid;
+	resp_iov[0].iov_base = ((__u8 *) &eid);
+	resp_iov[0].iov_len = 1;
+
+	resp_iov[1].iov_base = ((__u8 *)resp->hdr) ;
+	resp_iov[1].iov_len = resp->hdr_len ;
+
+	resp_iov[2].iov_base = ((__u8 *)resp->data);
+	resp_iov[2].iov_len = resp->data_len;
+
+	resp_iov[3].iov_base = &mic;
+	resp_iov[3].iov_len = sizeof(mic);
+
+	memset(&resp_msg, 0, sizeof(resp_msg));
+	resp_msg.msg_iov = resp_iov;
+	resp_msg.msg_iovlen = 4;
+
+	pollfds[0].fd = mctp->sd;
+	pollfds[0].events = POLLIN;
+	timeout = ep->timeout ?: -1;
+retry:
+	rc = ops.poll(pollfds, 1, timeout);
+	if (rc < 0) {
+		if (errno == EINTR)
+			goto retry;
+		errno_save = errno;
+		nvme_msg(ep->root, LOG_ERR,
+			 "Failed polling on MCTP socket: %m");
+		errno = errno_save;
+		return -1;
+	}
+
+	if (rc == 0) {
+		nvme_msg(ep->root, LOG_DEBUG, "Timeout on MCTP socket");
+		errno = ETIMEDOUT;
+		return -1;
+	}
+
+	rc = -1;
+	len = ops.recvmsg(mctp->sd, &resp_msg, MSG_DONTWAIT);
+
+	if (len < 0) {
+		errno_save = errno;
+		nvme_msg(ep->root, LOG_ERR,
+			 "Failure receiving MCTP message: %m\n");
+		errno = errno_save;
+		goto out;
+	}
+	/* Remove the length of the first byte - EID */
+	len -=1;
+
+	if (len == 0) {
+		nvme_msg(ep->root, LOG_WARNING, "No data from MCTP endpoint\n");
+		errno = EIO;
+		goto out;
+	}
+
+	/* The smallest response data is 8 bytes: generic 4-byte message header
+	 * plus four bytes of error data (excluding MIC). Ensure we have enough.
+	 */
+	if (len < 8 + sizeof(mic)) {
+		nvme_msg(ep->root, LOG_ERR,
+			 "Invalid MCTP response: too short (%zd bytes, needed %zd)\n",
+			 len, 8 + sizeof(mic));
+		errno = EPROTO;
+		goto out;
+	}
+
+	/* We can't have header/payload data that isn't a multiple of 4 bytes */
+	if (len & 0x3) {
+		nvme_msg(ep->root, LOG_WARNING,
+			 "Response message has unaligned length (%zd)!\n",
+			 len);
+		errno = EPROTO;
+		goto out;
+	}
+
+	/* Check for a More Processing Required response. This is a slight
+	 * layering violation, as we're pre-checking the MIC and inspecting
+	 * header fields. However, we need to do this in the transport in order
+	 * to keep the tag allocated and retry the recvmsg
+	 */
+	if (nvme_mi_mctp_resp_is_mpr(resp, len, mic, &mpr_time)) {
+		nvme_msg(ep->root, LOG_DEBUG,
+			 "Received More Processing Required, waiting for response\n");
+
+		/* if the controller hasn't set MPRT, fall back to our command/
+		 * response timeout, or the largest possible MPRT if none set */
+		if (!mpr_time)
+			mpr_time = ep->timeout ?: 0xffff;
+
+		/* clamp to the endpoint max */
+		if (ep->mprt_max && mpr_time > ep->mprt_max)
+			mpr_time = ep->mprt_max;
+
+		timeout = mpr_time;
+		goto retry;
+	}
+
+	/* If we have a shorter than expected response, we need to find the
+	 * MIC and the correct split between header & data. We know that the
+	 * split is 4-byte aligned, so the MIC will be entirely within one
+	 * of the iovecs.
+	 */
+	if (len == resp->hdr_len + resp->data_len + sizeof(mic)) {
+		/* Common case: expected data length. Header, data and MIC
+		 * are already laid-out correctly. Nothing to do. */
+
+	} else if (len < resp->hdr_len + sizeof(mic)) {
+		/* Response is smaller than the expected header. MIC is
+		 * somewhere in the header buf */
+		resp->hdr_len = len - sizeof(mic);
+		resp->data_len = 0;
+		memcpy(&mic, ((uint8_t *)resp->hdr) + resp->hdr_len,
+		       sizeof(mic));
+
+	} else {
+		/* We have a full header, but data is truncated - possibly
+		 * zero bytes. MIC is somewhere in the data buf */
+		resp->data_len = len - resp->hdr_len - sizeof(mic);
+		memcpy(&mic, ((uint8_t *)resp->data) + resp->data_len,
+		       sizeof(mic));
+	}
+
+	resp->mic = le32_to_cpu(mic);
+
+	rc = 0;
+
+out:
+	nvme_mi_mctp_tag_drop(ep, tag);
+
+	return rc;
+}
 static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
 			       struct nvme_mi_resp *resp)
@@ -456,12 +652,16 @@ static int nvme_mi_mctp_desc_ep(struct nvme_mi_ep *ep, char *buf, size_t len)
 static const struct nvme_mi_transport nvme_mi_transport_mctp = {
 	.name = "mctp",
 	.mic_enabled = true,
+#ifndef CONFIG_LIBMCTP
 	.submit = nvme_mi_mctp_submit,
+#else
+	.submit = nvme_mi_libmctp_submit,
+#endif
 	.close = nvme_mi_mctp_close,
 	.desc_ep = nvme_mi_mctp_desc_ep,
 };
 
-nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, __u8 eid)
+nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, nvme_netid_t netid, __u8 eid)
 {
 	struct nvme_mi_transport_mctp *mctp;
 	struct nvme_mi_ep *ep;
@@ -483,15 +683,42 @@ nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, __u8 eid)
 	if (!mctp->resp_buf)
 		goto err_free_ep;
 
-	mctp->net = netid;
 	mctp->eid = eid;
+#ifndef CONFIG_LIBMCTP
+	mctp->net = netid;
 
 	mctp->sd = ops.socket(AF_MCTP, SOCK_DGRAM, 0);
+#else
+	mctp->sd = ops.socket(AF_UNIX, SOCK_SEQPACKET, 0);
+#endif
 	if (mctp->sd < 0)
 		goto err_free_ep;
 
 	ep->transport = &nvme_mi_transport_mctp;
 	ep->transport_data = mctp;
+
+#ifdef CONFIG_LIBMCTP
+	int len = 0;
+	int rc = 0;
+	struct sockaddr_un addr;
+
+	addr.sun_family = AF_UNIX;
+
+	len = strlen(&netid[1]) + 1;
+	memcpy(&addr.sun_path, netid, len);
+	rc = connect(mctp->sd, (struct sockaddr *)&addr,
+		     sizeof(addr.sun_family) + len);
+	if (-1 == rc) {
+		fprintf(stderr,"connect failed to demux daemon\n");
+		goto err_free_ep;
+	}
+	uint8_t msgtype = MCTP_TYPE_NVME;
+	rc = write(mctp->sd, &msgtype, sizeof(msgtype));
+	if (-1 == rc) {
+		fprintf(stderr,"fail to register msg type\n");
+		goto err_free_ep;
+	}
+#endif
 
 	/* Assuming an i2c transport at 100kHz, smallest MTU (64+4). Given
 	 * a worst-case clock stretch, and largest-sized packets, we can
@@ -508,14 +735,14 @@ err_free_ep:
 	errno_save = errno;
 	nvme_mi_close(ep);
 	free(mctp->resp_buf);
-	free(mctp);
+	//free(mctp);
 	errno = errno_save;
 	return NULL;
 }
 
 #ifdef CONFIG_DBUS
 
-static int nvme_mi_mctp_add(nvme_root_t root, unsigned int netid, __u8 eid)
+static int nvme_mi_mctp_add(nvme_root_t root, nvme_netid_t netid, __u8 eid)
 {
 	nvme_mi_ep_t ep = NULL;
 
@@ -525,9 +752,11 @@ static int nvme_mi_mctp_add(nvme_root_t root, unsigned int netid, __u8 eid)
 		if (ep->transport != &nvme_mi_transport_mctp) {
 			continue;
 		}
+#ifndef CONFIG_LIBMCTP
 		const struct nvme_mi_transport_mctp *t = ep->transport_data;
 		if (t->eid == eid && t->net == netid)
 			return 0;
+#endif
 	}
 
 	ep = nvme_mi_open_mctp(root, netid, eid);
@@ -639,7 +868,14 @@ static int handle_mctp_endpoint(nvme_root_t root, const char* objpath,
 			errno = ENOENT;
 			return -1;
 		}
+
+#ifndef CONFIG_LIBMCTP
 		rc = nvme_mi_mctp_add(root, net, eid);
+#else
+		char *path = NULL;
+		//TODO: path will be from UnixSocket
+		rc = nvme_mi_mctp_add(root, path, eid);
+#endif
 		if (rc < 0) {
 			int errno_save = errno;
 			nvme_msg(root, LOG_ERR,
