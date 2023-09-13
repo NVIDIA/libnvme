@@ -28,7 +28,7 @@
 #include <dbus/dbus.h>
 
 #define MCTP_DBUS_PATH "/xyz/openbmc_project/mctp"
-#define MCTP_DBUS_IFACE "xyz.openbmc_project.MCTP.Control.PCIe"
+#define MCTP_DBUS_IFACE "xyz.openbmc_project.MCTP"
 #define MCTP_DBUS_IFACE_ENDPOINT "xyz.openbmc_project.MCTP.Endpoint"
 #endif
 
@@ -740,6 +740,7 @@ err_free_ep:
 	errno_save = errno;
 	nvme_mi_close(ep);
 	free(mctp->resp_buf);
+	/* The pointer mctp has been freed in nvme_mi_close() */
 	//free(mctp);
 	errno = errno_save;
 	return NULL;

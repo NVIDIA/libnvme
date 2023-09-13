@@ -771,7 +771,6 @@ int main(int argc, char **argv)
 		root = nvme_mi_create_root(stderr, DEFAULT_LOGLEVEL);
 		if (!root)
 			err(EXIT_FAILURE, "can't create NVMe root");
-
 		ep = nvme_mi_open_mctp(root, net, eid);
 		if (!ep)
 			errx(EXIT_FAILURE, "can't open MCTP endpoint %d:%d", net, eid);
