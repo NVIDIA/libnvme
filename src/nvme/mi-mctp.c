@@ -331,6 +331,11 @@ retry:
 		errno = errno_save;
 		goto out;
 	}
+
+	if (eid != mctp->eid){
+		nvme_msg(ep->root, LOG_WARNING, "Not my response, %d\n", eid);
+		goto retry;
+	}
 	/* Remove the length of the first byte - EID */
 	len -=1;
 
