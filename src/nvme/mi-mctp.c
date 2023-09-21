@@ -225,13 +225,13 @@ static int nvme_mi_libmctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
 			       struct nvme_mi_resp *resp)
 {
+	ssize_t len, resp_len, resp_hdr_len, resp_data_len;
 	struct nvme_mi_transport_mctp *mctp;
 	struct iovec req_iov[3], resp_iov[3];
 	struct msghdr req_msg, resp_msg;
 	int i, rc, errno_save, timeout;
 	struct pollfd pollfds[1];
 	unsigned int mpr_time;
-	ssize_t len;
 	__le32 mic;
 	__u8 tag;
 
@@ -283,22 +283,32 @@ static int nvme_mi_libmctp_submit(struct nvme_mi_ep *ep,
 		rc = -1;
 		goto out;
 	}
+
+	resp_len = resp->hdr_len + resp->data_len + sizeof(mic);
+	if (resp_len > mctp->resp_buf_size) {
+		void *tmp = realloc(mctp->resp_buf, resp_len);
+		if (!tmp) {
+			errno_save = errno;
+			nvme_msg(ep->root, LOG_ERR,
+				 "Failure allocating response buffer: %m\n");
+			errno = errno_save;
+			rc = -1;
+			goto out;
+		}
+		mctp->resp_buf = tmp;
+		mctp->resp_buf_size = resp_len;
+	}
+
 	unsigned char eid;
 	resp_iov[0].iov_base = ((__u8 *) &eid);
 	resp_iov[0].iov_len = 1;
 
-	resp_iov[1].iov_base = ((__u8 *)resp->hdr) ;
-	resp_iov[1].iov_len = resp->hdr_len ;
-
-	resp_iov[2].iov_base = ((__u8 *)resp->data);
-	resp_iov[2].iov_len = resp->data_len;
-
-	resp_iov[3].iov_base = &mic;
-	resp_iov[3].iov_len = sizeof(mic);
+	resp_iov[1].iov_base = ((__u8 *) mctp->resp_buf);
+	resp_iov[1].iov_len = resp_len;
 
 	memset(&resp_msg, 0, sizeof(resp_msg));
 	resp_msg.msg_iov = resp_iov;
-	resp_msg.msg_iovlen = 4;
+	resp_msg.msg_iovlen = 2;
 
 	pollfds[0].fd = mctp->sd;
 	pollfds[0].events = POLLIN;
@@ -323,7 +333,6 @@ retry:
 
 	rc = -1;
 	len = ops.recvmsg(mctp->sd, &resp_msg, MSG_DONTWAIT);
-
 	if (len < 0) {
 		errno_save = errno;
 		nvme_msg(ep->root, LOG_ERR,
@@ -331,13 +340,13 @@ retry:
 		errno = errno_save;
 		goto out;
 	}
-
 	if (eid != mctp->eid){
 		nvme_msg(ep->root, LOG_WARNING, "Not my response, %d\n", eid);
 		goto retry;
 	}
 	/* Remove the length of the first byte - EID */
 	len -=1;
+
 
 	if (len == 0) {
 		nvme_msg(ep->root, LOG_WARNING, "No data from MCTP endpoint\n");
@@ -356,21 +365,21 @@ retry:
 		goto out;
 	}
 
-	/* We can't have header/payload data that isn't a multiple of 4 bytes */
-	if (len & 0x3) {
-		nvme_msg(ep->root, LOG_WARNING,
-			 "Response message has unaligned length (%zd)!\n",
-			 len);
-		errno = EPROTO;
-		goto out;
-	}
+	/* Start unpacking the linear resp buffer into the split header + data
+	 * + MIC. We check for a MPR response before fully unpacking, as we'll
+	 * need to preserve the resp layout if we need to retry the receive.
+	 */
+
+	/* MIC is always at the tail */
+	memcpy(&mic, mctp->resp_buf + len - sizeof(mic), sizeof(mic));
+	len -= 4;
 
 	/* Check for a More Processing Required response. This is a slight
 	 * layering violation, as we're pre-checking the MIC and inspecting
 	 * header fields. However, we need to do this in the transport in order
 	 * to keep the tag allocated and retry the recvmsg
 	 */
-	if (nvme_mi_mctp_resp_is_mpr(resp, len, mic, &mpr_time)) {
+	if (nvme_mi_mctp_resp_is_mpr(mctp->resp_buf, len, mic, &mpr_time)) {
 		nvme_msg(ep->root, LOG_DEBUG,
 			 "Received More Processing Required, waiting for response\n");
 
@@ -387,32 +396,22 @@ retry:
 		goto retry;
 	}
 
-	/* If we have a shorter than expected response, we need to find the
-	 * MIC and the correct split between header & data. We know that the
-	 * split is 4-byte aligned, so the MIC will be entirely within one
-	 * of the iovecs.
-	 */
-	if (len == resp->hdr_len + resp->data_len + sizeof(mic)) {
-		/* Common case: expected data length. Header, data and MIC
-		 * are already laid-out correctly. Nothing to do. */
+	/* we expect resp->hdr_len bytes, but we may have less */
+    resp_hdr_len = resp->hdr_len;
+    if (resp_hdr_len > len)
+        resp_hdr_len = len;
+    memcpy(resp->hdr, mctp->resp_buf, resp_hdr_len);
+    resp->hdr_len = resp_hdr_len;
+    len -= resp_hdr_len;
 
-	} else if (len < resp->hdr_len + sizeof(mic)) {
-		/* Response is smaller than the expected header. MIC is
-		 * somewhere in the header buf */
-		resp->hdr_len = len - sizeof(mic);
-		resp->data_len = 0;
-		memcpy(&mic, ((uint8_t *)resp->hdr) + resp->hdr_len,
-		       sizeof(mic));
+    /* any remaining bytes are the data payload */
+    resp_data_len = resp->data_len;
+    if (resp_data_len > len)
+       resp_data_len = len;
+    memcpy(resp->data, mctp->resp_buf + resp_hdr_len, resp_data_len);
+       resp->data_len = resp_data_len;
 
-	} else {
-		/* We have a full header, but data is truncated - possibly
-		 * zero bytes. MIC is somewhere in the data buf */
-		resp->data_len = len - resp->hdr_len - sizeof(mic);
-		memcpy(&mic, ((uint8_t *)resp->data) + resp->data_len,
-		       sizeof(mic));
-	}
-
-	resp->mic = le32_to_cpu(mic);
+    resp->mic = le32_to_cpu(mic);
 
 	rc = 0;
 
@@ -421,6 +420,7 @@ out:
 
 	return rc;
 }
+
 static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
 			       struct nvme_mi_resp *resp)
@@ -739,8 +739,8 @@ nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, nvme_netid_t netid, __u8 eid)
 err_free_ep:
 	errno_save = errno;
 	nvme_mi_close(ep);
-	free(mctp->resp_buf);
 	/* The pointer mctp has been freed in nvme_mi_close() */
+	//free(mctp->resp_buf);
 	//free(mctp);
 	errno = errno_save;
 	return NULL;
