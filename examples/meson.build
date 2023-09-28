@@ -36,6 +36,7 @@ executable(
 executable(
     'mi-mctp',
     ['mi-mctp.c'],
+    install: true,
     dependencies: libnvme_mi_dep,
     include_directories: [incdir, internal_incdir]
 )

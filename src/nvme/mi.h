@@ -417,6 +417,7 @@ void nvme_mi_set_probe_enabled(nvme_root_t root, bool enabled);
 /* Top level management object: NVMe-MI Management Endpoint */
 struct nvme_mi_ep;
 
+
 /**
  * typedef nvme_mi_ep_t - MI Endpoint object.
  *
@@ -574,6 +575,22 @@ nvme_mi_ctrl_t nvme_mi_next_ctrl(nvme_mi_ep_t ep, nvme_mi_ctrl_t c);
 	for (c = nvme_mi_first_ctrl(ep), _c = nvme_mi_next_ctrl(ep, c);	      \
 	     c != NULL;							      \
 	     c = _c, _c = nvme_mi_next_ctrl(ep, c))
+
+/**
+ * nvme_mi_open_libmctp() - Create an endpoint using a MCTP connection for
+ * libmctp
+ * @root: root object to create under
+ * @netid: MCTP network ID on this system
+ * @eid: MCTP endpoint ID
+ *
+ * Transport-specific endpoint initialization for MI-connected endpoints. Once
+ * an endpoint is created, the rest of the API is transport-independent.
+ *
+ * Return: New endpoint object for @netid & @eid, or NULL on failure.
+ *
+ * See &nvme_mi_close
+ */
+nvme_mi_ep_t nvme_mi_open_libmctp(nvme_root_t root, unsigned int id, char *sockName, uint8_t eid);
 
 /**
  * nvme_mi_open_mctp() - Create an endpoint using a MCTP connection.
