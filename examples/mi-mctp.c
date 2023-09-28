@@ -676,10 +676,11 @@ int main(int argc, char **argv)
 	enum action action;
 	nvme_root_t root;
 	nvme_mi_ep_t ep;
+	char sockName[128] = {0};
 	bool dbus = false, usage = true;
 	uint8_t eid;
 	int rc = 0;
-	nvme_netid_t net;
+	unsigned int net;
 
 	if (argc >= 2 && strcmp(argv[1], "dbus") == 0) {
 		usage = false;
@@ -688,22 +689,32 @@ int main(int argc, char **argv)
 		argc -= 1;
 	} else if (argc >= 3) {
 		usage = false;
-#ifndef CONFIG_LIBMCTP
-		net = atoi(argv[1]);
-#else
-		char sockName[128] = {0};
 
-		snprintf(&sockName[1], sizeof(sockName) - 1, "%s", argv[1]);
-		net = sockName;
-#endif
+		net = atoi(argv[1]);
+
+#ifdef CONFIG_LIBMCTP
+               if (argc >= 4) {
+                    snprintf(&sockName[1], sizeof(sockName) - 1, "%s", argv[2]);
+                    eid = atoi(argv[3]) & 0xff;
+                    argv += 3;
+                    argc -= 3;
+               } else {
+                    usage = true;
+               }
+#else
 		eid = atoi(argv[2]) & 0xff;
 		argv += 2;
 		argc -= 2;
+#endif
 	}
 
 	if (usage) {
 		fprintf(stderr,
+#ifdef CONFIG_LIBMCTP
+			"usage: %s <net> <eid> <sockName> [action] [action args]\n"
+#else
 			"usage: %s <net> <eid> [action] [action args]\n"
+#endif
 			"       %s 'dbus'      [action] [action args]\n",
 			argv[0], argv[0]);
 		fprintf(stderr, "where action is:\n"
@@ -771,7 +782,11 @@ int main(int argc, char **argv)
 		root = nvme_mi_create_root(stderr, DEFAULT_LOGLEVEL);
 		if (!root)
 			err(EXIT_FAILURE, "can't create NVMe root");
+#ifdef CONFIG_LIBMCTP
+		ep = nvme_mi_open_libmctp(root, net, sockName, eid);
+#else
 		ep = nvme_mi_open_mctp(root, net, eid);
+#endif
 		if (!ep)
 			errx(EXIT_FAILURE, "can't open MCTP endpoint %d:%d", net, eid);
 		rc = do_action_endpoint(action, ep, argc, argv);

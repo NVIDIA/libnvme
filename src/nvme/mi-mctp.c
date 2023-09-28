@@ -665,7 +665,81 @@ static const struct nvme_mi_transport nvme_mi_transport_mctp = {
 	.desc_ep = nvme_mi_mctp_desc_ep,
 };
 
-nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, nvme_netid_t netid, __u8 eid)
+nvme_mi_ep_t nvme_mi_open_libmctp(nvme_root_t root, unsigned int netid,
+                                  char *sockName, __u8 eid) {
+  struct nvme_mi_transport_mctp *mctp;
+  struct nvme_mi_ep *ep;
+  int errno_save;
+
+  ep = nvme_mi_init_ep(root);
+  if (!ep)
+    return NULL;
+
+  mctp = malloc(sizeof(*mctp));
+  if (!mctp)
+    goto err_free_ep;
+
+  memset(mctp, 0, sizeof(*mctp));
+  mctp->sd = -1;
+
+  mctp->resp_buf_size = 4096;
+  mctp->resp_buf = malloc(mctp->resp_buf_size);
+  if (!mctp->resp_buf)
+    goto err_free_ep;
+
+  mctp->eid = eid;
+  mctp->net = netid;
+
+  mctp->sd = ops.socket(AF_UNIX, SOCK_SEQPACKET, 0);
+  if (mctp->sd < 0)
+    goto err_free_ep;
+
+  ep->transport = &nvme_mi_transport_mctp;
+  ep->transport_data = mctp;
+
+  int len = 0;
+  int rc = 0;
+  struct sockaddr_un addr;
+
+  addr.sun_family = AF_UNIX;
+
+  len = strlen(&sockName[1]) + 1;
+  memcpy(&addr.sun_path, sockName, len);
+  rc = connect(mctp->sd, (struct sockaddr *)&addr,
+               sizeof(addr.sun_family) + len);
+  if (-1 == rc) {
+    fprintf(stderr, "connect failed to demux daemon\n");
+    goto err_free_ep;
+  }
+  uint8_t msgtype = MCTP_TYPE_NVME;
+  rc = write(mctp->sd, &msgtype, sizeof(msgtype));
+  if (-1 == rc) {
+    fprintf(stderr, "fail to register msg type\n");
+    goto err_free_ep;
+  }
+
+  /* Assuming an i2c transport at 100kHz, smallest MTU (64+4). Given
+   * a worst-case clock stretch, and largest-sized packets, we can
+   * expect up to 1.6s per command/response pair. Allowing for a
+   * retry or two (handled by lower layers), 5s is a reasonable timeout.
+   */
+  ep->timeout = 5000;
+
+  nvme_mi_ep_probe(ep);
+
+  return ep;
+
+err_free_ep:
+	errno_save = errno;
+	nvme_mi_close(ep);
+	/* The pointer mctp has been freed in nvme_mi_close() */
+	//free(mctp->resp_buf);
+	//free(mctp);
+	errno = errno_save;
+	return NULL;
+}
+
+nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, unsigned int netid, __u8 eid)
 {
 	struct nvme_mi_transport_mctp *mctp;
 	struct nvme_mi_ep *ep;
@@ -688,41 +762,15 @@ nvme_mi_ep_t nvme_mi_open_mctp(nvme_root_t root, nvme_netid_t netid, __u8 eid)
 		goto err_free_ep;
 
 	mctp->eid = eid;
-#ifndef CONFIG_LIBMCTP
 	mctp->net = netid;
 
 	mctp->sd = ops.socket(AF_MCTP, SOCK_DGRAM, 0);
-#else
-	mctp->sd = ops.socket(AF_UNIX, SOCK_SEQPACKET, 0);
-#endif
 	if (mctp->sd < 0)
 		goto err_free_ep;
 
 	ep->transport = &nvme_mi_transport_mctp;
 	ep->transport_data = mctp;
 
-#ifdef CONFIG_LIBMCTP
-	int len = 0;
-	int rc = 0;
-	struct sockaddr_un addr;
-
-	addr.sun_family = AF_UNIX;
-
-	len = strlen(&netid[1]) + 1;
-	memcpy(&addr.sun_path, netid, len);
-	rc = connect(mctp->sd, (struct sockaddr *)&addr,
-		     sizeof(addr.sun_family) + len);
-	if (-1 == rc) {
-		fprintf(stderr,"connect failed to demux daemon\n");
-		goto err_free_ep;
-	}
-	uint8_t msgtype = MCTP_TYPE_NVME;
-	rc = write(mctp->sd, &msgtype, sizeof(msgtype));
-	if (-1 == rc) {
-		fprintf(stderr,"fail to register msg type\n");
-		goto err_free_ep;
-	}
-#endif
 
 	/* Assuming an i2c transport at 100kHz, smallest MTU (64+4). Given
 	 * a worst-case clock stretch, and largest-sized packets, we can
@@ -747,7 +795,7 @@ err_free_ep:
 
 #ifdef CONFIG_DBUS
 
-static int nvme_mi_mctp_add(nvme_root_t root, nvme_netid_t netid, __u8 eid)
+static int nvme_mi_mctp_add(nvme_root_t root, unsigned int netid, __u8 eid)
 {
 	nvme_mi_ep_t ep = NULL;
 
@@ -757,11 +805,9 @@ static int nvme_mi_mctp_add(nvme_root_t root, nvme_netid_t netid, __u8 eid)
 		if (ep->transport != &nvme_mi_transport_mctp) {
 			continue;
 		}
-#ifndef CONFIG_LIBMCTP
 		const struct nvme_mi_transport_mctp *t = ep->transport_data;
 		if (t->eid == eid && t->net == netid)
 			return 0;
-#endif
 	}
 
 	ep = nvme_mi_open_mctp(root, netid, eid);
@@ -874,13 +920,7 @@ static int handle_mctp_endpoint(nvme_root_t root, const char* objpath,
 			return -1;
 		}
 
-#ifndef CONFIG_LIBMCTP
 		rc = nvme_mi_mctp_add(root, net, eid);
-#else
-		char *path = NULL;
-		//TODO: path will be from UnixSocket
-		rc = nvme_mi_mctp_add(root, path, eid);
-#endif
 		if (rc < 0) {
 			int errno_save = errno;
 			nvme_msg(root, LOG_ERR,
