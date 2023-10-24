@@ -256,9 +256,22 @@ add_project_arguments(
     [
         '-fomit-frame-pointer',
         '-D_GNU_SOURCE',
+        '-Wno-pedantic',
+        '-Wno-sign-compare',
+        '-Wno-unused-parameter',
+        '-Wno-missing-field-initializers',
         '-include', 'internal/config.h',
     ],
     language : 'c',
+)
+add_project_arguments(
+    [
+        '-Wno-pedantic',
+        '-Wno-sign-compare',
+        '-Wno-unused-parameter',
+        '-Wno-missing-field-initializers',
+    ],
+    language : 'cpp',
 )
 incdir = include_directories(['.', 'ccan', 'src'])
 

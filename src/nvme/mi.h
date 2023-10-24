@@ -580,7 +580,8 @@ nvme_mi_ctrl_t nvme_mi_next_ctrl(nvme_mi_ep_t ep, nvme_mi_ctrl_t c);
  * nvme_mi_open_libmctp() - Create an endpoint using a MCTP connection for
  * libmctp
  * @root: root object to create under
- * @netid: MCTP network ID on this system
+ * @id: MCTP network ID on this system
+ * @sockname: the socket name connecting to demux daemon
  * @eid: MCTP endpoint ID
  *
  * Transport-specific endpoint initialization for MI-connected endpoints. Once
@@ -590,7 +591,7 @@ nvme_mi_ctrl_t nvme_mi_next_ctrl(nvme_mi_ep_t ep, nvme_mi_ctrl_t c);
  *
  * See &nvme_mi_close
  */
-nvme_mi_ep_t nvme_mi_open_libmctp(nvme_root_t root, unsigned int id, char *sockName, uint8_t eid);
+nvme_mi_ep_t nvme_mi_open_libmctp(nvme_root_t root, unsigned int id, char *sockname, uint8_t eid);
 
 /**
  * nvme_mi_open_mctp() - Create an endpoint using a MCTP connection.
