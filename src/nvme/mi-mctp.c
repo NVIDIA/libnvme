@@ -420,6 +420,7 @@ out:
 	return rc;
 }
 
+#ifndef CONFIG_LIBMCTP
 static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
 			       struct nvme_mi_resp *resp)
@@ -623,6 +624,7 @@ out:
 
 	return rc;
 }
+#endif
 
 static void nvme_mi_mctp_close(struct nvme_mi_ep *ep)
 {

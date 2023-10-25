@@ -24,6 +24,12 @@
 
 /* 4096 byte max MCTP message, plus space for header data */
 #define MAX_BUFSIZ 8192
+/* for LIBMCTP support, eid is the extra byte data for receive or send functions */
+#ifdef CONFIG_LIBMCTP
+#define OFFSET 1
+#else
+#define OFFSET 0
+#endif
 
 struct test_peer;
 
@@ -86,8 +92,8 @@ static void test_set_tx_mic(struct test_peer *peer)
 
 	assert(peer->tx_buf_len + sizeof(crc) <= MAX_BUFSIZ);
 
-	crc = nvme_mi_crc32_update(crc, peer->tx_buf, peer->tx_buf_len);
-	*(uint32_t *)(peer->tx_buf + peer->tx_buf_len) = cpu_to_le32(~crc);
+	crc = nvme_mi_crc32_update(crc, peer->tx_buf + OFFSET, peer->tx_buf_len);
+	*(uint32_t *)(peer->tx_buf + OFFSET + peer->tx_buf_len) = cpu_to_le32(~crc);
 	peer->tx_buf_len += sizeof(crc);
 }
 
@@ -98,6 +104,70 @@ int __wrap_socket(int family, int type, int protocol)
 	return test_peer.sd;
 }
 
+#ifdef CONFIG_LIBMCTP
+ssize_t __wrap_sendmsg(int sd, const struct msghdr *hdr, int flags)
+{
+	size_t i, pos;
+
+	assert(sd == test_peer.sd);
+
+	test_peer.rx_buf[0] = 0;
+	test_peer.rx_buf[1] = NVME_MI_MSGTYPE_NVME;
+
+	/* gather iovec into buf */
+	for (i = 1, pos = 2; i < hdr->msg_iovlen; i++) {
+		struct iovec *iov = &hdr->msg_iov[i];
+
+		assert(pos + iov->iov_len < MAX_BUFSIZ - 1);
+		memcpy(test_peer.rx_buf + pos, iov->iov_base, iov->iov_len);
+		pos += iov->iov_len;
+	}
+
+	test_peer.rx_buf_len = pos;
+
+	errno = test_peer.rx_errno;
+
+	return test_peer.rx_rc ?: (pos - 1);
+}
+
+ssize_t __wrap_recvmsg(int sd, struct msghdr *hdr, int flags)
+{
+	size_t i, pos, len;
+
+	assert(sd == test_peer.sd);
+
+	test_peer.tx_buf[0] = 0;
+	if (test_peer.tx_fn) {
+		test_peer.tx_fn_res = test_peer.tx_fn(&test_peer,
+						   test_peer.rx_buf,
+						   test_peer.rx_buf_len);
+	} else {
+		/* set up a few default response fields; caller may have
+		 * initialised the rest of the response */
+		test_peer.tx_buf[0 + OFFSET] = NVME_MI_MSGTYPE_NVME;
+		test_peer.tx_buf[1 + OFFSET] = test_peer.rx_buf[1 + OFFSET] | (NVME_MI_ROR_RSP << 7);
+		test_set_tx_mic(&test_peer);
+	}
+	test_peer.tx_buf_len += 1;
+
+	/* scatter buf into iovec */
+	for (i = 0, pos = 0; i < hdr->msg_iovlen && pos < test_peer.tx_buf_len;
+	     i++) {
+		struct iovec *iov = &hdr->msg_iov[i];
+
+		len = iov->iov_len;
+		if (len > test_peer.tx_buf_len - pos)
+			len = test_peer.tx_buf_len - pos;
+
+		memcpy(iov->iov_base, test_peer.tx_buf + pos, len);
+		pos += len;
+	}
+
+	errno = test_peer.tx_errno;
+
+	return test_peer.tx_rc ?: (pos );
+}
+#else
 ssize_t __wrap_sendmsg(int sd, const struct msghdr *hdr, int flags)
 {
 	size_t i, pos;
@@ -157,6 +227,7 @@ ssize_t __wrap_recvmsg(int sd, struct msghdr *hdr, int flags)
 
 	return test_peer.tx_rc ?: (pos - 1);
 }
+#endif
 
 int __wrap_poll(struct pollfd *fds, nfds_t nfds, int timeout)
 {
@@ -286,7 +357,7 @@ static void test_mi_resp_err(nvme_mi_ep_t ep, struct test_peer *peer)
 	int rc;
 
 	/* simple error response */
-	peer->tx_buf[4] = 0x02; /* internal error */
+	peer->tx_buf[4 + OFFSET] = 0x02; /* internal error */
 	peer->tx_buf_len = 8;
 
 	rc = nvme_mi_mi_read_mi_data_subsys(ep, &ss_info);
@@ -296,16 +367,16 @@ static void test_mi_resp_err(nvme_mi_ep_t ep, struct test_peer *peer)
 static void setup_unaligned_ctrl_list_resp(struct test_peer *peer)
 {
 	/* even number of controllers */
-	peer->tx_buf[8] = 0x02;
-	peer->tx_buf[9] = 0x00;
+	peer->tx_buf[8 + OFFSET] = 0x02;
+	peer->tx_buf[9 + OFFSET] = 0x00;
 
 	/* controller ID 1 */
-	peer->tx_buf[10] = 0x01;
-	peer->tx_buf[11] = 0x00;
+	peer->tx_buf[10 + OFFSET] = 0x01;
+	peer->tx_buf[11 + OFFSET] = 0x00;
 
 	/* controller ID 2 */
-	peer->tx_buf[12] = 0x02;
-	peer->tx_buf[13] = 0x00;
+	peer->tx_buf[12 + OFFSET] = 0x02;
+	peer->tx_buf[13 + OFFSET] = 0x00;
 
 	peer->tx_buf_len = 14;
 }
@@ -387,7 +458,7 @@ static void test_admin_resp_err(nvme_mi_ep_t ep, struct test_peer *peer)
 
 	/* Simple error response, will be shorter than the expected Admin
 	 * command response header. */
-	peer->tx_buf[4] = 0x02; /* internal error */
+	peer->tx_buf[4 + OFFSET] = 0x02; /* internal error */
 	peer->tx_buf_len = 8;
 
 	rc = nvme_mi_admin_identify_ctrl(ctrl, &id);
@@ -411,7 +482,7 @@ static void test_admin_resp_sizes(nvme_mi_ep_t ep, struct test_peer *peer)
 	ctrl = nvme_mi_init_ctrl(ep, 1);
 	assert(ctrl);
 
-	peer->tx_buf[4] = 0x02; /* internal error */
+	peer->tx_buf[4 + OFFSET] = 0x02; /* internal error */
 
 	for (i = 8; i <= 4096 + 8; i+=4) {
 		peer->tx_buf_len = i;
@@ -477,19 +548,19 @@ static int tx_mpr(struct test_peer *peer, void *buf, size_t len)
 	struct mpr_tx_info *tx_info = peer->tx_data;
 
 	memset(peer->tx_buf, 0, sizeof(peer->tx_buf));
-	peer->tx_buf[0] = NVME_MI_MSGTYPE_NVME;
-	peer->tx_buf[1] = test_peer.rx_buf[1] | (NVME_MI_ROR_RSP << 7);
+	peer->tx_buf[0 + OFFSET] = NVME_MI_MSGTYPE_NVME;
+	peer->tx_buf[1 + OFFSET] = test_peer.rx_buf[1 + OFFSET] | (NVME_MI_ROR_RSP << 7);
 
 	switch (tx_info->msg_no) {
 	case 1:
-		peer->tx_buf[4] = NVME_MI_RESP_MPR;
+		peer->tx_buf[4 + OFFSET] = NVME_MI_RESP_MPR;
 		peer->tx_buf_len = 8;
 		if (tx_info->admin_quirk) {
 			peer->tx_buf_len = 20;
 		}
 		break;
 	case 2:
-		peer->tx_buf[4] = NVME_MI_RESP_SUCCESS;
+		peer->tx_buf[4 + OFFSET] = NVME_MI_RESP_SUCCESS;
 		peer->tx_buf_len = tx_info->final_len;
 		break;
 	default:
@@ -599,19 +670,19 @@ static int tx_fn_mpr_poll(struct test_peer *peer, void *buf, size_t len)
 	unsigned int mprt;
 
 	memset(peer->tx_buf, 0, sizeof(peer->tx_buf));
-	peer->tx_buf[0] = NVME_MI_MSGTYPE_NVME;
-	peer->tx_buf[1] = test_peer.rx_buf[1] | (NVME_MI_ROR_RSP << 7);
+	peer->tx_buf[0 + OFFSET] = NVME_MI_MSGTYPE_NVME;
+	peer->tx_buf[1 + OFFSET] = test_peer.rx_buf[1 + OFFSET] | (NVME_MI_ROR_RSP << 7);
 
 	switch (tx_info->msg_no) {
 	case 1:
-		peer->tx_buf[4] = NVME_MI_RESP_MPR;
+		peer->tx_buf[4 + OFFSET] = NVME_MI_RESP_MPR;
 		peer->tx_buf_len = 8;
 		mprt = poll_info->mprt;
-		peer->tx_buf[7] = mprt >> 8;
-		peer->tx_buf[6] = mprt & 0xff;
+		peer->tx_buf[7 + OFFSET] = mprt >> 8;
+		peer->tx_buf[6 + OFFSET] = mprt & 0xff;
 		break;
 	case 2:
-		peer->tx_buf[4] = NVME_MI_RESP_SUCCESS;
+		peer->tx_buf[4 + OFFSET] = NVME_MI_RESP_SUCCESS;
 		peer->tx_buf_len = tx_info->final_len;
 		break;
 	default:
