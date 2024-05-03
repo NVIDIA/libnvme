@@ -33,6 +33,6 @@ jobs:
         # Can't use meson here, see
         # https://github.com/mesonbuild/meson/issues/7895
         run: ninja -C build coverage --verbose
-      - uses: codecov/codecov-action@v3
+      - uses: codecov/codecov-action@v4
         with:
           fail_ci_if_error: false
