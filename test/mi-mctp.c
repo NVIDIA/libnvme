@@ -24,9 +24,12 @@
 
 /* 4096 byte max MCTP message, plus space for header data */
 #define MAX_BUFSIZ 8192
+#define MCTP_TAG_NVME 5
+#define TEST_NID 0
+#define TEST_EID 0
 /* for LIBMCTP support, eid is the extra byte data for receive or send functions */
 #ifdef CONFIG_LIBMCTP
-#define OFFSET 1
+#define OFFSET 2
 #else
 #define OFFSET 0
 #endif
@@ -111,11 +114,12 @@ ssize_t __wrap_sendmsg(int sd, const struct msghdr *hdr, int flags)
 
 	assert(sd == test_peer.sd);
 
-	test_peer.rx_buf[0] = 0;
-	test_peer.rx_buf[1] = NVME_MI_MSGTYPE_NVME;
+	test_peer.rx_buf[0] = MCTP_TAG_NVME;
+	test_peer.rx_buf[1] = TEST_EID;
+	test_peer.rx_buf[2] = NVME_MI_MSGTYPE_NVME;
 
 	/* gather iovec into buf */
-	for (i = 1, pos = 2; i < hdr->msg_iovlen; i++) {
+	for (i = 1, pos = 3; i < hdr->msg_iovlen; i++) {
 		struct iovec *iov = &hdr->msg_iov[i];
 
 		assert(pos + iov->iov_len < MAX_BUFSIZ - 1);
@@ -136,7 +140,8 @@ ssize_t __wrap_recvmsg(int sd, struct msghdr *hdr, int flags)
 
 	assert(sd == test_peer.sd);
 
-	test_peer.tx_buf[0] = 0;
+	test_peer.tx_buf[0] = MCTP_TAG_NVME;
+	test_peer.tx_buf[1] = TEST_EID;
 	if (test_peer.tx_fn) {
 		test_peer.tx_fn_res = test_peer.tx_fn(&test_peer,
 						   test_peer.rx_buf,
@@ -148,7 +153,7 @@ ssize_t __wrap_recvmsg(int sd, struct msghdr *hdr, int flags)
 		test_peer.tx_buf[1 + OFFSET] = test_peer.rx_buf[1 + OFFSET] | (NVME_MI_ROR_RSP << 7);
 		test_set_tx_mic(&test_peer);
 	}
-	test_peer.tx_buf_len += 1;
+	test_peer.tx_buf_len += 2;
 
 	/* scatter buf into iovec */
 	for (i = 0, pos = 0; i < hdr->msg_iovlen && pos < test_peer.tx_buf_len;
@@ -547,7 +552,7 @@ static int tx_mpr(struct test_peer *peer, void *buf, size_t len)
 {
 	struct mpr_tx_info *tx_info = peer->tx_data;
 
-	memset(peer->tx_buf, 0, sizeof(peer->tx_buf));
+	memset(peer->tx_buf + OFFSET, 0, sizeof(peer->tx_buf) - OFFSET);
 	peer->tx_buf[0 + OFFSET] = NVME_MI_MSGTYPE_NVME;
 	peer->tx_buf[1 + OFFSET] = test_peer.rx_buf[1 + OFFSET] | (NVME_MI_ROR_RSP << 7);
 
@@ -669,7 +674,7 @@ static int tx_fn_mpr_poll(struct test_peer *peer, void *buf, size_t len)
 	struct mpr_poll_info *poll_info = peer->poll_data;
 	unsigned int mprt;
 
-	memset(peer->tx_buf, 0, sizeof(peer->tx_buf));
+	memset(peer->tx_buf + OFFSET, 0, sizeof(peer->tx_buf) - OFFSET);
 	peer->tx_buf[0 + OFFSET] = NVME_MI_MSGTYPE_NVME;
 	peer->tx_buf[1 + OFFSET] = test_peer.rx_buf[1 + OFFSET] | (NVME_MI_ROR_RSP << 7);
 
@@ -832,7 +837,7 @@ int main(void)
 	root = nvme_mi_create_root(fd, DEFAULT_LOGLEVEL);
 	assert(root);
 
-	ep = nvme_mi_open_mctp(root, 0, 0);
+	ep = nvme_mi_open_mctp(root, TEST_NID, TEST_EID);
 	assert(ep);
 
 	for (i = 0; i < ARRAY_SIZE(tests); i++) {
