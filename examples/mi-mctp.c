@@ -678,9 +678,9 @@ int main(int argc, char **argv)
 	nvme_mi_ep_t ep;
 	char sockName[128] = {0};
 	bool dbus = false, usage = true;
-	uint8_t eid;
+	uint8_t eid = 0;
 	int rc = 0;
-	unsigned int net;
+	unsigned int net = 0;
 
 	if (argc >= 2 && strcmp(argv[1], "dbus") == 0) {
 		usage = false;

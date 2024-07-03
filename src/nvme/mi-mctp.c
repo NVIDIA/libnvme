@@ -23,6 +23,7 @@
 #endif
 
 #include <ccan/endian/endian.h>
+#include <libmctp-externals.h>
 
 #ifdef CONFIG_DBUS
 #include <dbus/dbus.h>
@@ -86,6 +87,16 @@ struct nvme_mi_transport_mctp {
 	void	*resp_buf;
 	size_t	resp_buf_size;
 };
+
+#ifdef CONFIG_LIBMCTP
+
+enum libmctp_hdr_idx {
+	LIBMCTP_HDR_TAG = 0,
+	LIBMCTP_HDR_EID,
+	LIBMCTP_HDR_TYPE
+};
+
+#endif
 
 static int ioctl_tag(int sd, unsigned long req, struct mctp_ioc_tag_ctl *ctl)
 {
@@ -221,6 +232,7 @@ static bool nvme_mi_mctp_resp_is_mpr(void *buf, size_t len,
 	return true;
 }
 
+#ifdef CONFIG_LIBMCTP
 static int nvme_mi_libmctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
 			       struct nvme_mi_resp *resp)
@@ -250,9 +262,16 @@ static int nvme_mi_libmctp_submit(struct nvme_mi_ep *ep,
 	tag = nvme_mi_mctp_tag_alloc(ep);
 
 	i = 0;
-	uint8_t hdr[2] = { mctp->eid, MCTP_TYPE_NVME| MCTP_TYPE_MIC};
-	req_iov[i].iov_base = (__u8 *) hdr;
-	req_iov[i].iov_len = sizeof(hdr);
+
+	/* LIBMCTP TX Header
+	 * Byte 0: MCTP tag owner (bit3) + msg tag (bit2-0)
+	 * Byte 1: MCTP EID
+	 * Byte 2: MCTP TYPE
+	 */
+	uint8_t txhdr[] = {MCTP_TAG_OWNER | MCTP_TAG_NVME, mctp->eid,
+					   MCTP_TYPE_NVME| MCTP_TYPE_MIC};
+	req_iov[i].iov_base = (void*) txhdr;
+	req_iov[i].iov_len = sizeof(txhdr);
 	i++;
 
 	req_iov[i].iov_base = ((__u8 *)req->hdr) + 1;
@@ -299,9 +318,13 @@ static int nvme_mi_libmctp_submit(struct nvme_mi_ep *ep,
 		mctp->resp_buf_size = resp_len;
 	}
 
-	unsigned char eid;
-	resp_iov[0].iov_base = ((__u8 *) &eid);
-	resp_iov[0].iov_len = 1;
+	/* LIBMCTP RX Header
+	 * Byte 0: MCTP tag owner (bit3) + msg tag (bit2-0)
+	 * Byte 1: MCTP EID
+	 */
+	uint8_t rxhdr[LIBMCTP_HDR_EID + 1];
+	resp_iov[0].iov_base = (void*) rxhdr;
+	resp_iov[0].iov_len = sizeof(rxhdr);
 
 	resp_iov[1].iov_base = ((__u8 *) mctp->resp_buf);
 	resp_iov[1].iov_len = resp_len;
@@ -340,11 +363,15 @@ retry:
 		errno = errno_save;
 		goto out;
 	}
-	if (eid != mctp->eid){
+
+	if (rxhdr[LIBMCTP_HDR_TAG] != MCTP_TAG_NVME)
 		goto retry;
-	}
+
+	if (rxhdr[LIBMCTP_HDR_EID] != mctp->eid)
+		goto retry;
+
 	/* Remove the length of the first byte - EID */
-	len -=1;
+	len -= sizeof(rxhdr);
 
 
 	if (len == 0) {
@@ -420,7 +447,8 @@ out:
 	return rc;
 }
 
-#ifndef CONFIG_LIBMCTP
+#else // !CONFIG_LIBMCTP
+
 static int nvme_mi_mctp_submit(struct nvme_mi_ep *ep,
 			       struct nvme_mi_req *req,
 			       struct nvme_mi_resp *resp)
@@ -868,7 +896,7 @@ static int handle_mctp_endpoint(nvme_root_t root, const char* objpath,
 	bool have_eid = false, have_net = false, have_nvmemi = false;
 	mctp_eid_t eid;
 	int net;
-	int rc;
+	int rc = 0;
 
 	/* for each property */
 	for (;;) {
