@@ -23,7 +23,9 @@
 #endif
 
 #include <ccan/endian/endian.h>
+#ifdef CONFIG_LIBMCTP
 #include <libmctp-externals.h>
+#endif
 
 #ifdef CONFIG_DBUS
 #include <dbus/dbus.h>
