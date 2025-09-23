@@ -241,7 +241,7 @@ static int nvme_mi_libmctp_submit(struct nvme_mi_ep *ep,
 {
 	ssize_t len, resp_len, resp_hdr_len, resp_data_len;
 	struct nvme_mi_transport_mctp *mctp;
-	struct iovec req_iov[3], resp_iov[3];
+	struct iovec req_iov[4], resp_iov[4];
 	struct msghdr req_msg, resp_msg;
 	int i, rc, errno_save, timeout;
 	struct pollfd pollfds[1];
