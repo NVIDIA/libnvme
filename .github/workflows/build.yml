@@ -26,7 +26,7 @@ jobs:
       - name: build
         run: |
           scripts/build.sh -b ${{ matrix.buildtype }} -c ${{ matrix.compiler }}
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         name: upload logs
         if: failure()
         with:
@@ -67,7 +67,7 @@ jobs:
       - name: build
         run: |
           scripts/build.sh -b release -c gcc -t ${{ matrix.arch }} cross
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         name: upload logs
         if: failure()
         with:
@@ -88,7 +88,7 @@ jobs:
       - name: build
         run: |
           scripts/build.sh -b release -c gcc libdbus
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         name: upload logs
         if: failure()
         with:
@@ -110,7 +110,7 @@ jobs:
       - name: build
         run: |
           scripts/build.sh -b release -c gcc fallback
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: log files
