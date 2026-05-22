@@ -12,7 +12,7 @@ jobs:
     steps:
       - name: install libraries
         run: sudo apt-get install libjson-c-dev libdbus-1-dev lcov
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with:
           python-version: '3.x'
